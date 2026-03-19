@@ -1,82 +1,84 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Doctor Referral Automation", layout="wide")
+st.set_page_config(page_title="Dynamic Referral System", layout="wide")
 
-st.title("🏥 Doctor Referral Payout Calculator (Official Logic)")
+st.title("🏥 Dynamic Doctor Referral Calculator")
+st.info("Upload any monthly file. The system will detect doctors and apply the 25% logic automatically.")
 
-# 1. Define the "Payable Doctors" list based on the Result Sheet
-# This ensures only your boss's selected doctors get paid.
-PAYABLE_DOCTORS = [
-    "JINIA PAUL", 
-    "ARJUN DASGUPTA", 
-    "LIPIKA DAS MUKHOPADHYAY", 
-    "LIPIKA DAS MUKHERJEE", 
-    "LIPIKA DAS (MUKHOPADHYAY)",
-    "N V K MOHAN",
-    "CAPT A K SAHA"
-]
-
-uploaded_file = st.file_uploader("Upload Referral CSV or Excel", type=['csv', 'xlsx'])
+uploaded_file = st.file_uploader("Upload Referral File (CSV or Excel)", type=['csv', 'xlsx'])
 
 if uploaded_file is not None:
-    # Load data
-    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    # 1. Load Data Dynamically
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
     
-    # Standardize Column Names
+    # Clean column names to prevent errors if there are hidden spaces
     df.columns = df.columns.str.strip()
 
-    # Calculation Logic
-    def calculate_referral_logic(row):
+    # 2. Automated Logic Function
+    def apply_referral_logic(row):
         try:
             gross = float(row['Gross Amount'])
             discount = float(row['Discount'])
             net = float(row['Net Amount'])
-            doc_name = str(row['DoctorName']).upper().strip()
             
-            if gross <= 0: return 0, 0
+            if gross <= 0: return 0
             
+            # Logic: (25% - Actual Discount %) * Net
             disc_pct = discount / gross
-            
-            # Theoretical Referral (Doc Ref column in boss's sheet)
-            doc_ref = (0.25 - disc_pct) * net if disc_pct < 0.25 else 0
-            
-            # Net Payable (Only if doctor is in the approved list)
-            net_payable = doc_ref if any(name in doc_name for name in PAYABLE_DOCTORS) else 0
-            
-            return round(doc_ref, 2), round(net_payable, 2)
+            if disc_pct < 0.25:
+                return (0.25 - disc_pct) * net
+            return 0
         except:
-            return 0, 0
+            return 0
 
-    # Apply Logic
-    df[['Doc Ref', 'Net Payable']] = df.apply(
-        lambda x: pd.Series(calculate_referral_logic(x)), axis=1
+    # Calculate 'Potential Referral' for EVERY row first
+    df['Potential Referral'] = df.apply(apply_referral_logic, axis=1)
+
+    # 3. Dynamic Doctor Selection (The "Future-Proof" Part)
+    # This detects every unique doctor name in the uploaded file
+    all_doctors = sorted(df['DoctorName'].unique())
+    
+    st.sidebar.header("Settings")
+    selected_payables = st.sidebar.multiselect(
+        "Select Doctors to Pay (White List):", 
+        options=all_doctors,
+        default=[d for d in all_doctors if d in ["JINIA PAUL", "ARJUN DASGUPTA", "N V K MOHAN"]] # Pre-select known ones
     )
 
-    # Sidebar Filters
-    st.sidebar.header("Filters")
-    if 'DATE' in df.columns:
-        df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
-        months = df['DATE'].dt.strftime('%B %Y').dropna().unique()
-        selected_month = st.sidebar.selectbox("Select Month", months)
-        display_df = df[df['DATE'].dt.strftime('%B %Y') == selected_month]
-    else:
-        display_df = df
+    # 4. Filter and Finalize
+    # Set Net Payable to 0 if the doctor isn't selected in the sidebar
+    df['Net Payable'] = df.apply(
+        lambda x: x['Potential Referral'] if x['DoctorName'] in selected_payables else 0, 
+        axis=1
+    )
 
-    # Summary Dashboard
-    total_payout = display_df['Net Payable'].sum()
-    st.metric("Total Net Payable to Approved Doctors", f"₹{total_payout:,.2f}")
+    # 5. Display Dashboard
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Gross", f"₹{df['Gross Amount'].sum():,.2f}")
+    m2.metric("Total Net Amount", f"₹{df['Net Amount'].sum():,.2f}")
+    m3.metric("Total Payout (Selected)", f"₹{df['Net Payable'].sum():,.2f}", delta_color="normal")
 
-    # Payout Table (Summary by Doctor)
-    st.subheader("Summary Payout Table")
-    summary = display_df.groupby('DoctorName')['Net Payable'].sum().reset_index()
-    summary = summary[summary['Net Payable'] > 0].sort_values(by='Net Payable', ascending=False)
-    st.table(summary)
+    st.subheader("Summary by Doctor")
+    summary = df.groupby('DoctorName').agg({
+        'Gross Amount': 'sum',
+        'Net Amount': 'sum',
+        'Net Payable': 'sum'
+    }).reset_index()
+    
+    # Show only those with a payout or those selected
+    summary_view = summary[summary['Net Payable'] > 0].sort_values(by='Net Payable', ascending=False)
+    st.dataframe(summary_view, use_container_width=True)
 
-    # Detailed Table
-    with st.expander("View Full Calculation Details"):
-        st.dataframe(display_df)
-
-    # Download
-    csv = display_df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Processed Result", data=csv, file_name="Final_Referral_Payouts.csv")
+    # 6. Export Feature
+    st.subheader("Export Result")
+    final_csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Processed Report for Boss",
+        data=final_csv,
+        file_name=f"Processed_Referral_{uploaded_file.name}",
+        mime='text/csv'
+    )
